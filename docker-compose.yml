@@ -1,0 +1,94 @@
+version: '3.8'
+
+services:
+  # 1. Banco de Dados (PostgreSQL)
+  db:
+    image: postgres:14-alpine
+    environment:
+      POSTGRES_USER: ${DB_USER:-simplelogin}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-simplelogin_password}
+      POSTGRES_DB: ${DB_NAME:-simplelogin}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U simplelogin"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: always
+
+  # 2. Redis (Cache e Filas)
+  redis:
+    image: redis:6-alpine
+    volumes:
+      - redis_data:/data
+    restart: always
+
+  # 3. Aplicação Principal (Interface Web)
+  app:
+    build: .
+    image: simplelogin-app
+    container_name: simplelogin-app
+    restart: always
+    ports:
+      - "7777:7777"
+    environment: &app_env
+      URL: ${URL} # Ex: https://email.rennanfurst.com.br
+      DB_URI: postgresql://${DB_USER:-simplelogin}:${DB_PASSWORD:-simplelogin_password}@db:5432/${DB_NAME:-simplelogin}
+      FLASK_SECRET: ${FLASK_SECRET}
+      GNUPG_HOME: /sl/gpg
+      REDIS_URL: redis://redis:6379/0
+      # Configurações opcionais mas recomendadas
+      DISABLE_ONBOARDING: "false"
+    volumes:
+      - sl_data:/sl
+      - sl_gpg:/sl/gpg
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  # 4. Email Handler (Processa emails recebidos)
+  email-handler:
+    build: .
+    image: simplelogin-app # Reusa a imagem construída acima
+    command: python email_handler.py
+    restart: always
+    environment: *app_env # Usa as mesmas variáveis do app
+    volumes:
+      - sl_data:/sl
+      - sl_gpg:/sl/gpg
+    depends_on:
+      - db
+      - redis
+
+  # 5. Job Runner (Tarefas agendadas)
+  job-runner:
+    build: .
+    image: simplelogin-app
+    command: python job_runner.py
+    restart: always
+    environment: *app_env
+    volumes:
+      - sl_data:/sl
+      - sl_gpg:/sl/gpg
+    depends_on:
+      - db
+      - redis
+
+  # 6. Migration (Roda uma vez para criar as tabelas e para)
+  migration:
+    build: .
+    image: simplelogin-app
+    command: flask db upgrade
+    environment: *app_env
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  db_data:
+  redis_data:
+  sl_data:
+  sl_gpg:
